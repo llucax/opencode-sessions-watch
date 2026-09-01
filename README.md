@@ -91,15 +91,15 @@ defaults.
       ["./plugins/sessions-sidebar.tsx", { "idleMaxAge": "2h", "showCurrent": true }]
     ]
 
-| Option           | Default     | Meaning                                                        |
-|------------------|-------------|----------------------------------------------------------------|
-| `idleFreshAge`   | `"15m"`     | idle for less than this counts as fresh rather than history    |
-| `idleMaxAge`     | `"1h"`      | hide idle sessions older than this                             |
-| `alwaysShowIdle` | `1`         | show this many most recent `idle` rows regardless of age       |
-| `maxTotal`       | unlimited   | cap on rows in the main list                                   |
-| `maxPerState`    | unlimited   | per-group caps: `{ waiting, idleFresh, retry, working, idle }` |
-| `showCurrent`    | `false`     | include the session being viewed, bold and in accent colour    |
-| `subagents`      | `"section"` | how Task-tool child sessions appear, see below                 |
+| Option           | Default     | Meaning                                                           |
+|------------------|-------------|-------------------------------------------------------------------|
+| `idleFreshAge`   | `"15m"`     | idle for less than this counts as fresh rather than history       |
+| `idleMaxAge`     | `"1h"`      | hide idle sessions older than this                                |
+| `alwaysShowIdle` | `1`         | show this many most recent `idle` rows regardless of age          |
+| `maxTotal`       | unlimited   | cap on rows in the main list                                      |
+| `maxPerState`    | unlimited   | per-group caps: `{ waiting, idleFresh, retry, working, idle }`    |
+| `showCurrent`    | `false`     | pin the session being viewed at the top, bold and accent-coloured |
+| `subagents`      | `"section"` | how Task-tool child sessions appear, see below                    |
 
 Durations are written as a string pairing a number with a unit, one of `ms`,
 `s`, `m`, `h` or `d`; a bare number is read as milliseconds. A count given as
@@ -131,6 +131,13 @@ Rows are selected by taking each group in display order up to its `maxPerState`
 cap, then truncating the result to `maxTotal`. Truncation drops from the end,
 and the groups are ordered by urgency, so an idle session held by
 `alwaysShowIdle` can never displace one that needs attention.
+
+The session being viewed, when `showCurrent` puts it in the list, sits outside
+all of that. It is pinned above every group, in the accent colour and bold, and
+is exempt from the age filters and the `maxPerState` caps. It is the fixed point
+you read the rest of the list against, so it stays put as its own state changes,
+does not disappear once it has been idle past `idleMaxAge`, and does not spend a
+group's cap. Its icon still reports what it is doing.
 
 The fresh/history split is made when the list is drawn, from how long the
 session has been idle, not by treating "no longer fresh" as something the

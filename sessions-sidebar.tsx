@@ -410,9 +410,12 @@ function select(model: Model, currentID: string): Row[] {
 
   const roots: Row[] = []
   const children = new Map<string, Row[]>()
+  // Kept aside rather than pushed into `roots`: the session being viewed is not
+  // one of the sessions competing for your attention, it is the one already
+  // holding it, so it does not belong to any group. See below.
+  let current: Row | undefined
 
   for (const session of model.sessions()) {
-    const isCurrent = session.id === currentID
     if (session.parentID) {
       if (!showTree) continue
       if (options.subagents === "tree" && session.parentID !== currentID) continue
@@ -421,14 +424,29 @@ function select(model: Model, currentID: string): Row[] {
       children.get(session.parentID)!.push(row)
       continue
     }
-    if (isCurrent && !showCurrent) continue
-    roots.push(toRow(model, session, at, isCurrent, 0))
+    if (session.id === currentID) {
+      if (showCurrent) current = toRow(model, session, at, true, 0)
+      continue
+    }
+    roots.push(toRow(model, session, at, false, 0))
   }
 
   const byState = new Map<State, Row[]>(STATES.map((state) => [state, []]))
   for (const row of roots) byState.get(row.state)!.push(row)
 
   const picked: Row[] = []
+
+  // Pinned above every group, and exempt from the age filters and the
+  // maxPerState caps below. Asking for the current session is asking for a fixed
+  // point to read the rest of the list against, so it must not move as its own
+  // state changes, must not vanish once it has been idle past idleMaxAge, and
+  // must not spend a group's cap. Its icon still reports its state; what marks
+  // it out is the accent colour and the bold, which no group uses.
+  if (current) {
+    picked.push(current)
+    for (const child of grouped(children.get(current.id) ?? [])) picked.push(child)
+  }
+
   for (const state of STATES) {
     let rows = order(state, byState.get(state)!)
 
@@ -458,8 +476,9 @@ function select(model: Model, currentID: string): Row[] {
 
   // Truncating from the end can only ever drop the least urgent rows, because
   // the groups are already concatenated in priority order: history goes first,
-  // then working, then retry. A forced idle session therefore can never
-  // displace one that needs attention.
+  // then working, then retry, and the current session is at the very top. A
+  // forced idle session therefore can never displace one that needs attention,
+  // and nothing can displace the current session.
   return picked.slice(0, options.maxTotal)
 }
 
@@ -501,6 +520,9 @@ function SessionRow(props: { api: TuiPluginApi; row: Row; at: number }) {
   const colour = () => {
     const t = theme()
     if (!t) return undefined
+    // Ahead of the groups on purpose, and `accent` is a key none of them use,
+    // so the session being viewed reads as its own thing whatever it is doing.
+    // `select()` pins it to the top to match.
     if (props.row.current) return t.accent
     switch (props.row.state) {
       case "waiting":
