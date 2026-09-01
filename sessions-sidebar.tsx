@@ -4,8 +4,8 @@ import type { TuiPlugin, TuiPluginApi, TuiPluginModule, TuiThemeCurrent } from "
 import type { Session, SessionStatus } from "@opencode-ai/sdk/v2"
 
 // Lists the sessions of the current project in the sidebar, grouped by whether
-// they are waiting on you, retrying, working, or recently idle, with how long
-// each has been in that state.
+// they are waiting on you, freshly idle, retrying, working, or idle for longer,
+// with how long each has been that way.
 //
 // This file must keep the .tsx extension. opencode transforms plugin sources
 // with babel-preset-solid through a Bun loader whose filter is
@@ -31,14 +31,29 @@ const TICK_INTERVAL = 1_000
 /* options                                                                     */
 /* -------------------------------------------------------------------------- */
 
-type State = "waiting" | "retry" | "working" | "idle"
+// The groups a row can be displayed in. Note that this is one more than the
+// model tracks: `idleFresh` is not a state a session enters, it is how long a
+// row has been idle, decided afresh on every tick. See `toRow`.
+type State = "waiting" | "idleFresh" | "retry" | "working" | "idle"
 
-// Display order, which is also priority order: waiting blocks on you, retry is
-// quietly stalling, working is fine, idle is history.
-const STATES: readonly State[] = ["waiting", "retry", "working", "idle"]
+// The states the model actually tracks and stamps a timestamp for. Keeping
+// `idleFresh` out of them is the whole point; see the warning on `toRow`.
+type TrackedState = Exclude<State, "idleFresh">
+
+// Display order, which is also priority order: waiting blocks on you, a session
+// that has just stopped most likely wants you now, retry is quietly stalling,
+// working is fine, older idle is history.
+//
+// Fresh outranks retry because a session that stopped needs a human and a retry
+// is recovering on its own.
+const STATES: readonly State[] = ["waiting", "idleFresh", "retry", "working", "idle"]
 
 const ICONS: Record<State, string> = {
   waiting: "\u2753", // ❓
+  // Emoji-presentation by default, like ❓ 🔄 💤, so it is two columns
+  // everywhere and ⚙️ stays the only glyph carrying a variation selector, and
+  // so the only one terminals disagree about the width of.
+  idleFresh: "\u2705", // ✅
   retry: "\u{1F504}", // 🔄
   working: "\u2699\uFE0F", // ⚙️
   idle: "\u{1F4A4}", // 💤
@@ -47,6 +62,7 @@ const ICONS: Record<State, string> = {
 type SubagentMode = "hidden" | "section" | "tree" | "all-tree"
 
 type Options = {
+  idleFreshAge: number
   idleMaxAge: number
   alwaysShowIdle: number
   maxTotal: number
@@ -56,11 +72,16 @@ type Options = {
 }
 
 const DEFAULTS: Options = {
+  // A guess, and the one number here with no evidence behind it: long enough to
+  // survive a coffee break, short enough that a session you have already dealt
+  // with drops out of the attention group.
+  idleFreshAge: 15 * 60 * 1000,
   idleMaxAge: 60 * 60 * 1000,
   alwaysShowIdle: 1,
   maxTotal: Number.POSITIVE_INFINITY,
   maxPerState: {
     waiting: Number.POSITIVE_INFINITY,
+    idleFresh: Number.POSITIVE_INFINITY,
     retry: Number.POSITIVE_INFINITY,
     working: Number.POSITIVE_INFINITY,
     idle: Number.POSITIVE_INFINITY,
@@ -103,6 +124,10 @@ function toOptions(raw: Record<string, unknown> | undefined): Options {
 
   const subagents = raw.subagents
   return {
+    // Deliberately not clamped against idleMaxAge. They answer different
+    // questions: idleFreshAge picks the group, idleMaxAge decides whether the
+    // row is shown at all. Clamping would hide a typo rather than show it.
+    idleFreshAge: toDuration(raw.idleFreshAge, DEFAULTS.idleFreshAge),
     idleMaxAge: toDuration(raw.idleMaxAge, DEFAULTS.idleMaxAge),
     alwaysShowIdle: toCount(raw.alwaysShowIdle, DEFAULTS.alwaysShowIdle),
     maxTotal: toCount(raw.maxTotal, DEFAULTS.maxTotal),
@@ -119,7 +144,7 @@ function toOptions(raw: Record<string, unknown> | undefined): Options {
 /* model                                                                       */
 /* -------------------------------------------------------------------------- */
 
-type Tracked = { state: State; since: number }
+type Tracked = { state: TrackedState; since: number }
 
 type Model = ReturnType<typeof createModel>
 
@@ -186,7 +211,7 @@ function createModel(api: TuiPluginApi, options: Options) {
     sync()
   }
 
-  function derive(sessionID: string): State {
+  function derive(sessionID: string): TrackedState {
     // Waiting is not a SessionStatus; a session blocked on a permission is
     // still "busy" underneath, so pending requests have to win.
     if ((pending.get(sessionID)?.size ?? 0) > 0) return "waiting"
@@ -311,7 +336,7 @@ function createModel(api: TuiPluginApi, options: Options) {
     now,
     revision,
     dispose,
-    stateOf: (sessionID: string): State => tracked.get(sessionID)?.state ?? "idle",
+    stateOf: (sessionID: string): TrackedState => tracked.get(sessionID)?.state ?? "idle",
     sinceOf: (sessionID: string, fallback: number): number => tracked.get(sessionID)?.since ?? fallback,
   }
 }
@@ -320,33 +345,53 @@ function createModel(api: TuiPluginApi, options: Options) {
 /* selection                                                                   */
 /* -------------------------------------------------------------------------- */
 
+// `state` here is the display group, which is one wider than what the model
+// tracks: an idle session lands in `idleFresh` or `idle` depending on its age.
 type Row = {
   id: string
   title: string
   state: State
   since: number
-  updated: number
   current: boolean
   depth: number
 }
 
-function toRow(model: Model, session: Session, current: boolean, depth: number): Row {
+// `at` is the timestamp the whole pass is classified against, so every row in
+// one render agrees on what counts as fresh.
+//
+// The fresh/history split has to be made here rather than in the model's
+// `derive()`. `Tracked.since` is restamped whenever `derive()` returns a state
+// it did not return last time, so if ageing out of fresh were a state change, a
+// row that had been idle for an hour would restamp and suddenly read `<1m`,
+// which is the very number the split exists to make readable. Classifying from
+// `now - since` instead is idempotent, and costs only a re-sort of a handful of
+// rows a second, which `select()` gets for free by already reading
+// `model.now()`.
+function toRow(model: Model, session: Session, at: number, current: boolean, depth: number): Row {
+  const state = model.stateOf(session.id)
+  const since = model.sinceOf(session.id, session.time.updated)
   return {
     id: session.id,
     title: session.title || session.slug || session.id,
-    state: model.stateOf(session.id),
-    since: model.sinceOf(session.id, session.time.updated),
-    updated: session.time.updated,
+    state: state === "idle" && at - since <= model.options.idleFreshAge ? "idleFresh" : state,
+    since,
     current,
     depth,
   }
 }
 
-// Waiting, retry and working sort by longest in the current state first; idle
-// sorts by most recently active first.
+// Waiting, retry and working sort by longest in the current state first; both
+// idle groups sort by most recently stopped first.
+//
+// The idle groups sort on `since` rather than `session.time.updated`. The two
+// almost always agree and come apart when a session is touched without changing
+// state, a rename bumping `updated` while `since` stays at the moment it
+// stopped. `since` is what the elapsed column shows and what decided which of
+// the two idle groups the row landed in, so sorting on it makes each group read
+// monotonically down the screen and agree with itself.
 function order(state: State, rows: Row[]): Row[] {
-  return state === "idle"
-    ? rows.sort((a, b) => b.updated - a.updated)
+  return state === "idleFresh" || state === "idle"
+    ? rows.sort((a, b) => b.since - a.since)
     : rows.sort((a, b) => a.since - b.since)
 }
 
@@ -371,13 +416,13 @@ function select(model: Model, currentID: string): Row[] {
     if (session.parentID) {
       if (!showTree) continue
       if (options.subagents === "tree" && session.parentID !== currentID) continue
-      const row = toRow(model, session, false, 1)
+      const row = toRow(model, session, at, false, 1)
       if (!children.has(session.parentID)) children.set(session.parentID, [])
       children.get(session.parentID)!.push(row)
       continue
     }
     if (isCurrent && !showCurrent) continue
-    roots.push(toRow(model, session, isCurrent, 0))
+    roots.push(toRow(model, session, at, isCurrent, 0))
   }
 
   const byState = new Map<State, Row[]>(STATES.map((state) => [state, []]))
@@ -387,9 +432,21 @@ function select(model: Model, currentID: string): Row[] {
   for (const state of STATES) {
     let rows = order(state, byState.get(state)!)
 
-    if (state === "idle") {
+    // Age filter first, then the per-group cap. The two thresholds answer
+    // different questions and are not clamped against each other, so an
+    // idleFreshAge above idleMaxAge is not an error: the fresh group is simply
+    // bounded by visibility and history holds nothing but the forced rows.
+    if (state === "idleFresh") {
+      rows = rows.filter((row) => at - row.since <= options.idleMaxAge)
+    } else if (state === "idle") {
       // Eligible when young enough, or among the most recent few that are shown
       // regardless of age. Sorting already put the most recent first.
+      //
+      // alwaysShowIdle floors this group rather than idle as a whole. Flooring
+      // the whole of idle spent the slot on the newest idle row, which
+      // idleMaxAge nearly always admits on its own, so the default of 1 forced
+      // nothing and history was usually empty. Applied here it does what it
+      // reads as: one line of history under whatever is fresh.
       rows = rows.filter((row, index) => index < options.alwaysShowIdle || at - row.since <= options.idleMaxAge)
     }
 
@@ -400,17 +457,19 @@ function select(model: Model, currentID: string): Row[] {
   }
 
   // Truncating from the end can only ever drop the least urgent rows, because
-  // the groups are already concatenated in priority order. A forced idle
-  // session therefore can never displace one that needs attention.
+  // the groups are already concatenated in priority order: history goes first,
+  // then working, then retry. A forced idle session therefore can never
+  // displace one that needs attention.
   return picked.slice(0, options.maxTotal)
 }
 
 function tasksOf(model: Model, currentID: string): Row[] {
   if (model.options.subagents !== "section") return []
+  const at = model.now()
   const rows: Row[] = []
   for (const session of model.sessions()) {
     if (session.parentID !== currentID) continue
-    rows.push(toRow(model, session, false, 0))
+    rows.push(toRow(model, session, at, false, 0))
   }
   return grouped(rows)
 }
@@ -446,6 +505,11 @@ function SessionRow(props: { api: TuiPluginApi; row: Row; at: number }) {
     switch (props.row.state) {
       case "waiting":
         return t.warning
+      // Fresh must not stay muted: colour is what makes the group readable
+      // without depending on the emoji, and muted is what makes a row look
+      // dead. `success` matches ✅.
+      case "idleFresh":
+        return t.success
       case "retry":
         return t.error
       case "working":
