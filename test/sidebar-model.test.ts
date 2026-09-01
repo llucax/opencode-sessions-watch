@@ -126,6 +126,221 @@ describe("upsert, via the event stream", () => {
   })
 })
 
+describe("blockedAncestors composing a parent's status, via the event stream", () => {
+  test("a parent whose direct child is blocked derives waiting", async () => {
+    const fake = createFakeApi()
+    const model = await start(fake)
+
+    fake.emit({ id: "e1", type: "session.created", properties: { sessionID: "p", info: session("p") } })
+    fake.emit({ id: "e2", type: "session.status", properties: { sessionID: "p", status: { type: "busy" } } })
+    expect(model.stateOf("p")).toBe("working")
+
+    fake.emit({
+      id: "e3",
+      type: "session.created",
+      properties: { sessionID: "c", info: session("c", { parentID: "p" }) },
+    })
+    fake.emit({
+      id: "e4",
+      type: "permission.asked",
+      properties: { id: "req1", sessionID: "c", permission: "bash", patterns: [], metadata: {}, always: [] },
+    })
+    expect(model.stateOf("p")).toBe("waiting")
+  })
+
+  test("a grandparent derives waiting when the grandchild is blocked", async () => {
+    const fake = createFakeApi()
+    const model = await start(fake)
+
+    fake.emit({ id: "e1", type: "session.created", properties: { sessionID: "gp", info: session("gp") } })
+    fake.emit({
+      id: "e2",
+      type: "session.created",
+      properties: { sessionID: "p", info: session("p", { parentID: "gp" }) },
+    })
+    fake.emit({
+      id: "e3",
+      type: "session.created",
+      properties: { sessionID: "gc", info: session("gc", { parentID: "p" }) },
+    })
+    fake.emit({
+      id: "e4",
+      type: "permission.asked",
+      properties: { id: "req1", sessionID: "gc", permission: "bash", patterns: [], metadata: {}, always: [] },
+    })
+
+    // Both intervening levels derive waiting, proving the walk is not one
+    // level deep.
+    expect(model.stateOf("p")).toBe("waiting")
+    expect(model.stateOf("gp")).toBe("waiting")
+  })
+
+  test("clearing the child's prompt returns the parent to its own state", async () => {
+    const fake = createFakeApi()
+    const model = await start(fake)
+
+    fake.emit({ id: "e1", type: "session.created", properties: { sessionID: "p", info: session("p") } })
+    fake.emit({ id: "e2", type: "session.status", properties: { sessionID: "p", status: { type: "busy" } } })
+    fake.emit({
+      id: "e3",
+      type: "session.created",
+      properties: { sessionID: "c", info: session("c", { parentID: "p" }) },
+    })
+    fake.emit({
+      id: "e4",
+      type: "permission.asked",
+      properties: { id: "req1", sessionID: "c", permission: "bash", patterns: [], metadata: {}, always: [] },
+    })
+    expect(model.stateOf("p")).toBe("waiting")
+
+    fake.emit({
+      id: "e5",
+      type: "permission.replied",
+      properties: { sessionID: "c", requestID: "req1", reply: "once" },
+    })
+    // Back to reporting its own status, not stuck waiting on a clear prompt.
+    expect(model.stateOf("p")).toBe("working")
+  })
+
+  test("stamps the parent's since when the child blocks, and re-stamps it when the block clears", async () => {
+    const fake = createFakeApi()
+    const model = await start(fake)
+
+    fake.emit({
+      id: "e1",
+      type: "session.created",
+      properties: { sessionID: "p", info: session("p", { time: { created: 0, updated: 0 } }) },
+    })
+    fake.emit({ id: "e2", type: "session.status", properties: { sessionID: "p", status: { type: "busy" } } })
+    fake.emit({
+      id: "e3",
+      type: "session.created",
+      properties: { sessionID: "c", info: session("c", { parentID: "p" }) },
+    })
+
+    // A short real delay around each transition, so the two restamps land in
+    // different milliseconds and the assertions below are not racing the
+    // clock: sync()'s own since-stamping deliberately reads the wall clock
+    // rather than the seam (see the clock seam's commit message).
+    await new Promise((resolve) => setTimeout(resolve, 2))
+    fake.emit({
+      id: "e4",
+      type: "permission.asked",
+      properties: { id: "req1", sessionID: "c", permission: "bash", patterns: [], metadata: {}, always: [] },
+    })
+    expect(model.stateOf("p")).toBe("waiting")
+    const blockedSince = model.sinceOf("p", -1)
+
+    await new Promise((resolve) => setTimeout(resolve, 2))
+    fake.emit({
+      id: "e5",
+      type: "permission.replied",
+      properties: { sessionID: "c", requestID: "req1", reply: "once" },
+    })
+    expect(model.stateOf("p")).toBe("working")
+    expect(model.sinceOf("p", -1)).not.toBe(blockedSince)
+  })
+
+  test("a child that is merely busy or retrying does not make the parent waiting", async () => {
+    const fake = createFakeApi()
+    const model = await start(fake)
+
+    fake.emit({ id: "e1", type: "session.created", properties: { sessionID: "p", info: session("p") } })
+    fake.emit({
+      id: "e2",
+      type: "session.created",
+      properties: { sessionID: "c", info: session("c", { parentID: "p" }) },
+    })
+    fake.emit({ id: "e3", type: "session.status", properties: { sessionID: "c", status: { type: "busy" } } })
+    expect(model.stateOf("p")).toBe("idle")
+
+    fake.emit({
+      id: "e4",
+      type: "session.status",
+      properties: { sessionID: "c", status: { type: "retry", attempt: 1, message: "", next: 0 } },
+    })
+    expect(model.stateOf("p")).toBe("idle")
+  })
+
+  test("a parentID cycle terminates and does not hang", async () => {
+    const fake = createFakeApi()
+    const model = await start(fake)
+
+    fake.emit({
+      id: "e1",
+      type: "session.created",
+      properties: { sessionID: "a", info: session("a", { parentID: "b" }) },
+    })
+    fake.emit({
+      id: "e2",
+      type: "session.created",
+      properties: { sessionID: "b", info: session("b", { parentID: "a" }) },
+    })
+    fake.emit({
+      id: "e3",
+      type: "permission.asked",
+      properties: { id: "req1", sessionID: "a", permission: "bash", patterns: [], metadata: {}, always: [] },
+    })
+
+    // Reaching this line at all is the main assertion: the walk terminated.
+    // a is waiting on its own pending request; the cycle also marks b, since
+    // b is a's ancestor before the walk comes back around to a itself.
+    expect(model.stateOf("a")).toBe("waiting")
+    expect(model.stateOf("b")).toBe("waiting")
+  })
+
+  test("an orphan child, whose parent is not held, changes nothing and does not throw", async () => {
+    const fake = createFakeApi()
+    const model = await start(fake)
+
+    fake.emit({
+      id: "e1",
+      type: "session.created",
+      properties: { sessionID: "c", info: session("c", { parentID: "ghost" }) },
+    })
+    fake.emit({
+      id: "e2",
+      type: "permission.asked",
+      properties: { id: "req1", sessionID: "c", permission: "bash", patterns: [], metadata: {}, always: [] },
+    })
+
+    // The orphan's own state is unaffected by walking off the edge of the
+    // known sessions.
+    expect(model.stateOf("c")).toBe("waiting")
+    expect(model.sessions().map((s) => s.id)).toEqual(["c"])
+  })
+
+  test("a parent already waiting on its own prompt stays waiting, with one since, when a child also blocks", async () => {
+    const fake = createFakeApi()
+    const model = await start(fake)
+
+    fake.emit({ id: "e1", type: "session.created", properties: { sessionID: "p", info: session("p") } })
+    fake.emit({
+      id: "e2",
+      type: "permission.asked",
+      properties: { id: "own", sessionID: "p", permission: "bash", patterns: [], metadata: {}, always: [] },
+    })
+    expect(model.stateOf("p")).toBe("waiting")
+    const ownSince = model.sinceOf("p", -1)
+
+    fake.emit({
+      id: "e3",
+      type: "session.created",
+      properties: { sessionID: "c", info: session("c", { parentID: "p" }) },
+    })
+    fake.emit({
+      id: "e4",
+      type: "permission.asked",
+      properties: { id: "req1", sessionID: "c", permission: "bash", patterns: [], metadata: {}, always: [] },
+    })
+
+    // Still just "waiting": composing on top of an existing self-block is
+    // not a state change, so sync() does not restamp it.
+    expect(model.stateOf("p")).toBe("waiting")
+    expect(model.sinceOf("p", -1)).toBe(ownSince)
+  })
+})
+
 describe("remove, via the event stream", () => {
   test("clears status, pending and tracking together", async () => {
     const fake = createFakeApi()
