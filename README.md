@@ -2,30 +2,33 @@
 
 A TUI plugin for [opencode](https://opencode.ai) that adds a panel to the
 sidebar listing the sessions of the current project, grouped by whether they are
-waiting on you, retrying, working, or recently idle, each with how long it has
-been in that state.
+waiting on you, freshly idle, retrying, working, or idle for longer, each with
+how long it has been that way.
 
     Active Sessions
     ❓ (<1m) Fix the flaky reconnect test
     ❓ ( 5m) Draft the release notes
+    ✅ ( 2m) Review PR 412
+    ✅ (11m) Add the --json flag
     🔄 (47m) Port the parser to nom 8
     ⚙️ ( 2h) Rewrite the config loader
-    ⚙️ (12m) Add the --json flag
-    💤 ( 3m) Review PR 412
     💤 ( 1d) Look into the CI cache
 
     Current Session Tasks
     ⚙️ ( 8m) explore: find the retry logic
 
-| Icon | State   | Meaning                                      |
-|------|---------|----------------------------------------------|
-| ❓   | waiting | a permission or question is awaiting a reply |
-| 🔄   | retry   | a provider call failed and is being retried  |
-| ⚙️   | working | the agent is running                         |
-| 💤   | idle    | nothing happening                            |
+| Icon | Group       | Meaning                                           |
+|------|-------------|---------------------------------------------------|
+| ❓   | `waiting`   | a permission or question is awaiting a reply      |
+| ✅   | `idleFresh` | stopped within `idleFreshAge`; probably wants you |
+| 🔄   | `retry`     | a provider call failed and is being retried       |
+| ⚙️   | `working`   | the agent is running                              |
+| 💤   | `idle`      | stopped longer ago; history                       |
 
-Groups are listed in that order: waiting blocks on you, retry is quietly
-stalling, working is fine, idle is history.
+Groups are listed in that order: waiting blocks on you, a session that has just
+stopped most likely wants you now, retry is quietly stalling, working is fine,
+older idle is history. Fresh outranks retry because a session that stopped needs
+a human and a retry is recovering on its own.
 
 The panel covers one project, the one the TUI is running in; sessions belonging
 to any other project are not listed.
@@ -88,18 +91,29 @@ defaults.
       ["./plugins/sessions-sidebar.tsx", { "idleMaxAge": "2h", "showCurrent": true }]
     ]
 
-| Option           | Default     | Meaning                                                     |
-|------------------|-------------|-------------------------------------------------------------|
-| `idleMaxAge`     | `"1h"`      | hide idle sessions older than this                          |
-| `alwaysShowIdle` | `1`         | show this many most recent idle sessions regardless of age   |
-| `maxTotal`       | unlimited   | cap on rows in the main list                                |
-| `maxPerState`    | unlimited   | per-state caps: `{ waiting, retry, working, idle }`          |
-| `showCurrent`    | `false`     | include the session being viewed, bold and in accent colour |
-| `subagents`      | `"section"` | how Task-tool child sessions appear, see below              |
+| Option           | Default     | Meaning                                                        |
+|------------------|-------------|----------------------------------------------------------------|
+| `idleFreshAge`   | `"15m"`     | idle for less than this counts as fresh rather than history    |
+| `idleMaxAge`     | `"1h"`      | hide idle sessions older than this                             |
+| `alwaysShowIdle` | `1`         | show this many most recent `idle` rows regardless of age       |
+| `maxTotal`       | unlimited   | cap on rows in the main list                                   |
+| `maxPerState`    | unlimited   | per-group caps: `{ waiting, idleFresh, retry, working, idle }` |
+| `showCurrent`    | `false`     | include the session being viewed, bold and in accent colour    |
+| `subagents`      | `"section"` | how Task-tool child sessions appear, see below                 |
 
 Durations are written as a string pairing a number with a unit, one of `ms`,
 `s`, `m`, `h` or `d`; a bare number is read as milliseconds. A count given as
 `null` means unlimited.
+
+The two idle thresholds answer different questions and are not clamped against
+each other: `idleMaxAge` decides whether a row is shown at all, `idleFreshAge`
+decides which of the two idle groups it lands in. Setting `idleFreshAge` above
+`idleMaxAge` is not an error, it just leaves the `idle` group holding nothing
+but the rows `alwaysShowIdle` forces.
+
+The default `idleFreshAge` of `15m` is a guess: long enough to survive a coffee
+break, short enough that a session you have already dealt with drops out of the
+attention group. Adjust it after living with it.
 
 `subagents` takes one of:
 
@@ -111,12 +125,17 @@ Durations are written as a string pairing a number with a unit, one of `ms`,
 - `"all-tree"` — children of every listed session are nested under their parent.
 
 Within a group, waiting, retry and working sort by longest in the current state
-first, and idle sorts by most recently active first.
+first, and both idle groups sort by most recently stopped first.
 
 Rows are selected by taking each group in display order up to its `maxPerState`
 cap, then truncating the result to `maxTotal`. Truncation drops from the end,
 and the groups are ordered by urgency, so an idle session held by
 `alwaysShowIdle` can never displace one that needs attention.
+
+The fresh/history split is made when the list is drawn, from how long the
+session has been idle, not by treating "no longer fresh" as something the
+session does. A row crossing `idleFreshAge` therefore changes icon, colour and
+position while its elapsed time carries on counting from when it stopped.
 
 ## Updating
 
