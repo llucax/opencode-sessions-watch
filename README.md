@@ -100,6 +100,10 @@ stopped most likely wants you now, retry is quietly stalling, working is fine,
 older idle is history. Fresh outranks retry because a session that stopped needs
 a human and a retry is recovering on its own.
 
+A session also counts as `waiting` when one of its subagents does: the server
+reports a parent blocked on a child's prompt as merely busy, but it is still you
+the child is waiting on.
+
 The panel covers one project, the one the TUI is running in; sessions belonging
 to any other project are not listed. It renders nothing at all when no session
 qualifies.
@@ -141,6 +145,10 @@ attention group. Adjust it after living with it.
 - `"tree"` — children of the current session are nested under it in the main
   list. Implies `showCurrent`.
 - `"all-tree"` — children of every listed session are nested under their parent.
+
+A parent waiting on a subagent shows as `waiting` in every one of those modes,
+including `"hidden"`, where you get the signal that something needs you without
+the noise of the child sessions themselves.
 
 Within a group, waiting, retry and working sort by longest in the current state
 first, and both idle groups sort by most recently stopped first.
