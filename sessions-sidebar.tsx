@@ -54,15 +54,48 @@ type TrackedState = Exclude<State, "idleFresh">
 // is recovering on its own.
 const STATES: readonly State[] = ["waiting", "idleFresh", "retry", "working", "idle"]
 
+// Deliberately width-one geometric symbols, not the emoji they replaced,
+// picked against two separate failure modes.
+//
+// opencode's dialog backdrop dims the sidebar behind it, but OpenTUI's
+// compositor only blends a cell it itself measures as one column wide
+// (blendCells()'s destWidthIsOne check, opentui#837); a cell OpenTUI counts
+// as two columns loses its glyph outright, not merely dimmed. OpenTUI's own
+// eawToWidth() (packages/native/src/utf8.zig) counts two columns for East
+// Asian Width Fullwidth/Wide, or for a large hardcoded emoji table
+// regardless of width. Four of the five old icons, ❓✅🔄💤, are Wide and
+// vanished; the fifth, ⚙️, is Neutral and outside that table, so OpenTUI
+// itself measured it as one column and it survived: the alignment oddity
+// the old comment here named, not a vanishing one, since some terminals
+// still draw it two columns wide regardless.
+//
+// So a replacement needs both: not Fullwidth/Wide and not in eawToWidth()'s
+// emoji table, which is what keeps OpenTUI from calling it two columns in
+// the first place; and, defensively, East Asian Width Neutral or Narrow and
+// not emoji-capable by Unicode's own data, since a terminal can still draw
+// an Ambiguous or emoji-capable codepoint wider than the one column OpenTUI
+// budgeted for it, which shifts the row rather than erasing it.
+//
+// idle is a knowing exception to the second, defensive constraint, not an
+// oversight: ┄ is East Asian Width Ambiguous, so a terminal configured to
+// draw Ambiguous wide can still shift that one row by a column. It stays
+// safe against the first and far worse failure regardless, because
+// eawToWidth() measures Ambiguous as one column, so destWidthIsOne holds
+// and it composites intact behind a dialog rather than losing its glyph.
+// Chosen for legibility over the safe lookalike ⋯ U+22EF with that
+// trade-off spelled out. Do not "fix" it to a Neutral glyph.
+//
+// Considered and rejected: ↺ U+21BA passes both but mirrors retry's ↻, two
+// near-identical arrows being worse than one; ┈ and ← are Ambiguous; ⁉ is
+// Neutral but is itself in eawToWidth()'s emoji table.
+//
+// Overridable per state via the `icons` option; see DEFAULTS and toOptions.
 const ICONS: Record<State, string> = {
-  waiting: "\u2753", // ❓
-  // Emoji-presentation by default, like ❓ 🔄 💤, so it is two columns
-  // everywhere and ⚙️ stays the only glyph carrying a variation selector, and
-  // so the only one terminals disagree about the width of.
-  idleFresh: "\u2705", // ✅
-  retry: "\u{1F504}", // 🔄
-  working: "\u2699\uFE0F", // ⚙️
-  idle: "\u{1F4A4}", // 💤
+  waiting: "\u003F", // ?, blocked, needs a human
+  idleFresh: "\u2713", // ✓, just finished
+  retry: "\u21BB", // ↻, retrying
+  working: "\u23F5", // ⏵, running
+  idle: "\u2504", // ┄, history; Ambiguous width, see above
 }
 
 type SubagentMode = "hidden" | "section" | "tree" | "all-tree"
@@ -75,6 +108,7 @@ type Options = {
   maxPerState: Record<State, number>
   showCurrent: boolean
   subagents: SubagentMode
+  icons: Record<State, string>
 }
 
 const DEFAULTS: Options = {
@@ -94,6 +128,7 @@ const DEFAULTS: Options = {
   },
   showCurrent: false,
   subagents: "section",
+  icons: ICONS,
 }
 
 const DURATION = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)$/
@@ -128,6 +163,19 @@ export function toOptions(raw: Record<string, unknown> | undefined): Options {
     maxPerState[state] = toCount(caps[state], DEFAULTS.maxPerState[state])
   }
 
+  // A partial map merged over the defaults per key, rather than the whole
+  // map rejected for one bad entry, so overriding one state does not
+  // require restating the other four. Not width-checked: a user asking for
+  // a two-column emoji, knowing it vanishes behind a dialog, is their call.
+  const icons = { ...DEFAULTS.icons }
+  if (raw.icons !== null && typeof raw.icons === "object") {
+    const rawIcons = raw.icons as Record<string, unknown>
+    for (const state of STATES) {
+      const value = rawIcons[state]
+      if (typeof value === "string") icons[state] = value
+    }
+  }
+
   const subagents = raw.subagents
   return {
     // Deliberately not clamped against idleMaxAge. They answer different
@@ -138,6 +186,7 @@ export function toOptions(raw: Record<string, unknown> | undefined): Options {
     alwaysShowIdle: toCount(raw.alwaysShowIdle, DEFAULTS.alwaysShowIdle),
     maxTotal: toCount(raw.maxTotal, DEFAULTS.maxTotal),
     maxPerState,
+    icons,
     showCurrent: typeof raw.showCurrent === "boolean" ? raw.showCurrent : DEFAULTS.showCurrent,
     subagents:
       subagents === "hidden" || subagents === "section" || subagents === "tree" || subagents === "all-tree"
@@ -584,7 +633,7 @@ export function elapsed(ms: number): string {
   return `${Math.floor(hours / 24)}d`.padStart(3)
 }
 
-function SessionRow(props: { api: TuiPluginApi; row: Row; at: number }) {
+function SessionRow(props: { api: TuiPluginApi; row: Row; at: number; icons: Record<State, string> }) {
   // TuiTheme carries its own `ready` flag, so treat `current` as possibly
   // absent. Returning undefined for a colour just leaves the text unstyled,
   // which is a far better outcome than throwing mid-render.
@@ -614,7 +663,7 @@ function SessionRow(props: { api: TuiPluginApi; row: Row; at: number }) {
   }
 
   const line = () =>
-    `${" ".repeat(props.row.depth * 2)}${ICONS[props.row.state]} (${elapsed(props.at - props.row.since)}) ${props.row.title}`
+    `${" ".repeat(props.row.depth * 2)}${props.icons[props.row.state]} (${elapsed(props.at - props.row.since)}) ${props.row.title}`
 
   // Deliberately one <text> for the whole row rather than an aligned row of
   // separate elements. Siblings in a flex row wrap independently once the
@@ -655,7 +704,7 @@ function Panel(props: { api: TuiPluginApi; model: Model; sessionID: string }) {
             <b>Active Sessions</b>
           </text>
           <For each={rows()}>
-            {(row) => <SessionRow api={props.api} row={row} at={props.model.now()} />}
+            {(row) => <SessionRow api={props.api} row={row} at={props.model.now()} icons={props.model.options.icons} />}
           </For>
         </Show>
         <Show when={tasks().length > 0}>
@@ -664,7 +713,7 @@ function Panel(props: { api: TuiPluginApi; model: Model; sessionID: string }) {
             <b>Current Session Tasks</b>
           </text>
           <For each={tasks()}>
-            {(row) => <SessionRow api={props.api} row={row} at={props.model.now()} />}
+            {(row) => <SessionRow api={props.api} row={row} at={props.model.now()} icons={props.model.options.icons} />}
           </For>
         </Show>
       </box>
