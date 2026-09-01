@@ -289,15 +289,35 @@ the convention above is "symlink the plugin file" and a shared import would
 break it. The duplication is a duration parser and a handful of `api.event.on`
 lines; a module to save them would cost more than it returns.
 
-Do not install `solid-js` or `@opentui/solid` next to a plugin. opencode
-rewrites those specifiers to its own already-loaded instances, and a second copy
-risks a second reactive graph. To type-check a file, put the dependencies in a
-scratch directory and point `tsc` at the plugin from there.
+Do not install `solid-js` or `@opentui/solid` next to a plugin when it runs
+inside opencode. opencode rewrites those specifiers to its own already-loaded
+instances, and a second copy risks a second reactive graph. The repository's
+own `devDependencies`, used for type-checking and testing, are unaffected:
+see [Development](#development).
 
 Each sidebar row is deliberately a single `<text>` element. Siblings in a flex
 row wrap independently once the sidebar is narrower than the row, which splits
 the elapsed column across two lines and makes it read as part of the title.
 Colour goes on the whole row because `<span>` carries no style options.
+
+## Development
+
+    bun install
+    bun run typecheck
+    bun test
+
+`tsconfig.json` type-checks both plugins against the real `@opencode-ai/plugin`
+and `@opentui/solid` types, pinned to the versions opencode itself loads.
+`bunfig.toml` preloads `@opentui/solid/preload` for `bun test`, which gives
+tests the same Solid transform opencode runs plugin sources through; a
+top-level `preload` key is not enough, only the one under `[test]` is read.
+
+`toDuration`, `toCount`, `select` and the other pure functions are exported
+alongside the plugin's own `default`, purely so tests can reach them; opencode
+only ever reads `module.default`; the extra names are otherwise inert.
+`test/fake-api.ts` builds a narrow `TuiPluginApi` fake and a fake clock so the
+stateful cores (`createModel`, `createWatcher`) can be driven through the
+event stream and through time without a live TUI or a real sleep.
 
 ## License
 
