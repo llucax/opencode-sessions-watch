@@ -148,6 +148,26 @@ type Tracked = { state: TrackedState; since: number }
 
 type Model = ReturnType<typeof createModel>
 
+// The seam start() takes to control the passage of time, so a test can drive
+// the ticker and the resync interval without waiting on either for real.
+// Defaults to the real globals, so the tui() entry point, which calls
+// start() with no argument, sees no behaviour change.
+export type Clock = {
+  now: () => number
+  setTimeout: typeof setTimeout
+  clearTimeout: typeof clearTimeout
+  setInterval: typeof setInterval
+  clearInterval: typeof clearInterval
+}
+
+const REAL_CLOCK: Clock = {
+  now: () => Date.now(),
+  setTimeout,
+  clearTimeout,
+  setInterval,
+  clearInterval,
+}
+
 type Level = "debug" | "info" | "warn" | "error"
 
 function log(api: TuiPluginApi, level: Level, message: string, extra?: Record<string, unknown>) {
@@ -300,34 +320,48 @@ function createModel(api: TuiPluginApi, options: Options) {
     log(api, "info", "resynced", { directory: where, sessions: sessions().length, ...counts })
   }
 
-  const unsubscribe = [
-    api.event.on("session.status", (event) => {
-      statuses.set(event.properties.sessionID, event.properties.status)
-      sync()
-    }),
-    api.event.on("session.idle", (event) => {
-      statuses.set(event.properties.sessionID, { type: "idle" })
-      sync()
-    }),
-    api.event.on("permission.asked", (event) => block(event.properties.sessionID, `p:${event.properties.id}`)),
-    api.event.on("permission.replied", (event) => unblock(event.properties.sessionID, `p:${event.properties.requestID}`)),
-    api.event.on("question.asked", (event) => block(event.properties.sessionID, `q:${event.properties.id}`)),
-    api.event.on("question.replied", (event) => unblock(event.properties.sessionID, `q:${event.properties.requestID}`)),
-    api.event.on("question.rejected", (event) => unblock(event.properties.sessionID, `q:${event.properties.requestID}`)),
-    api.event.on("session.created", (event) => upsert(event.properties.info)),
-    api.event.on("session.updated", (event) => upsert(event.properties.info)),
-    api.event.on("session.deleted", (event) => remove(event.properties.sessionID)),
-  ]
+  let unsubscribe: Array<() => void> = []
+  let ticker: ReturnType<typeof setInterval> | undefined
+  let resyncer: ReturnType<typeof setInterval> | undefined
+  let clock: Clock = REAL_CLOCK
 
-  const ticker = setInterval(() => setNow(Date.now()), TICK_INTERVAL)
-  const resyncer = setInterval(() => void resync(), RESYNC_INTERVAL)
+  // Subscribes to the event stream, starts the ticker and the resync
+  // interval, and fires the first resync. Split out of construction so
+  // creating a model has no side effect: the tui() entry point calls
+  // start() right after, so runtime behaviour is unchanged, and a test
+  // calls it with a fake clock instead of reaching for the network.
+  function start(seam: Clock = REAL_CLOCK) {
+    clock = seam
+    unsubscribe = [
+      api.event.on("session.status", (event) => {
+        statuses.set(event.properties.sessionID, event.properties.status)
+        sync()
+      }),
+      api.event.on("session.idle", (event) => {
+        statuses.set(event.properties.sessionID, { type: "idle" })
+        sync()
+      }),
+      api.event.on("permission.asked", (event) => block(event.properties.sessionID, `p:${event.properties.id}`)),
+      api.event.on("permission.replied", (event) => unblock(event.properties.sessionID, `p:${event.properties.requestID}`)),
+      api.event.on("question.asked", (event) => block(event.properties.sessionID, `q:${event.properties.id}`)),
+      api.event.on("question.replied", (event) => unblock(event.properties.sessionID, `q:${event.properties.requestID}`)),
+      api.event.on("question.rejected", (event) => unblock(event.properties.sessionID, `q:${event.properties.requestID}`)),
+      api.event.on("session.created", (event) => upsert(event.properties.info)),
+      api.event.on("session.updated", (event) => upsert(event.properties.info)),
+      api.event.on("session.deleted", (event) => remove(event.properties.sessionID)),
+    ]
 
-  void resync()
+    ticker = clock.setInterval(() => setNow(clock.now()), TICK_INTERVAL)
+    resyncer = clock.setInterval(() => void resync(), RESYNC_INTERVAL)
+
+    void resync()
+  }
 
   function dispose() {
-    clearInterval(ticker)
-    clearInterval(resyncer)
+    if (ticker !== undefined) clock.clearInterval(ticker)
+    if (resyncer !== undefined) clock.clearInterval(resyncer)
     for (const off of unsubscribe) off()
+    unsubscribe = []
   }
 
   return {
@@ -335,6 +369,7 @@ function createModel(api: TuiPluginApi, options: Options) {
     sessions,
     now,
     revision,
+    start,
     dispose,
     stateOf: (sessionID: string): TrackedState => tracked.get(sessionID)?.state ?? "idle",
     sinceOf: (sessionID: string, fallback: number): number => tracked.get(sessionID)?.since ?? fallback,
@@ -612,6 +647,7 @@ const tui: TuiPlugin = async (api, options) => {
   // with the first time the sidebar is opened. Durations would otherwise all
   // begin at the moment you first looked at them.
   const [model, disposeRoot] = createRoot((dispose) => [createModel(api, parsed), dispose] as const)
+  model.start()
 
   api.lifecycle.onDispose(() => {
     model.dispose()

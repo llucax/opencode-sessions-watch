@@ -34,6 +34,7 @@ function makeModel(params: {
     sessions: () => params.sessions,
     now: () => params.now ?? 0,
     revision: () => 0,
+    start: () => {},
     dispose: () => {},
     stateOf: (sessionID: string): TrackedState => states[sessionID] ?? "idle",
     sinceOf: (sessionID: string, fallback: number): number => since[sessionID] ?? fallback,
