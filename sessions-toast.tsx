@@ -206,7 +206,7 @@ type Entry = {
   requestID?: string
 }
 
-function createWatcher(api: TuiPluginApi, options: Options) {
+export function createWatcher(api: TuiPluginApi, options: Options) {
   /* ---------------------------------------------------------------------- */
   /* scope                                                                   */
   /* ---------------------------------------------------------------------- */

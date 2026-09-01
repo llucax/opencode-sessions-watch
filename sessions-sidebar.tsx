@@ -191,7 +191,7 @@ async function data<T>(request: Promise<{ data?: T }>, api: TuiPluginApi, what: 
   }
 }
 
-function createModel(api: TuiPluginApi, options: Options) {
+export function createModel(api: TuiPluginApi, options: Options) {
   // Read on each use rather than captured: TuiState carries a `ready` flag, so
   // the path is not necessarily populated when plugins are initialised. The
   // periodic resync repairs anything the first attempt got wrong.
