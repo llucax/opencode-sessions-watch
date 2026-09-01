@@ -110,4 +110,39 @@ describe("toOptions", () => {
   test("ignores a non-boolean showCurrent", () => {
     expect(toOptions({ showCurrent: "yes" }).showCurrent).toBe(false)
   })
+
+  describe("icons", () => {
+    const defaults = {
+      waiting: "\u003F",
+      idleFresh: "\u2713",
+      retry: "\u21BB",
+      working: "\u23F5",
+      idle: "\u2504",
+    }
+
+    test("defaults to the width-one glyphs when absent", () => {
+      expect(toOptions(undefined).icons).toEqual(defaults)
+      expect(toOptions({}).icons).toEqual(defaults)
+    })
+
+    test("merges a partial override over the defaults", () => {
+      expect(toOptions({ icons: { waiting: "!" } }).icons).toEqual({ ...defaults, waiting: "!" })
+    })
+
+    test("ignores unknown state keys", () => {
+      expect(toOptions({ icons: { bogus: "!" } }).icons).toEqual(defaults)
+    })
+
+    test("ignores a non-string value for a known state", () => {
+      expect(toOptions({ icons: { waiting: 42 } }).icons).toEqual(defaults)
+    })
+
+    test("rejects a non-object icons wholesale, keeping every default", () => {
+      expect(toOptions({ icons: "nope" }).icons).toEqual(defaults)
+    })
+
+    test("accepts an explicit emoji override, unvalidated", () => {
+      expect(toOptions({ icons: { working: "\u2699\uFE0F" } }).icons.working).toBe("\u2699\uFE0F")
+    })
+  })
 })
