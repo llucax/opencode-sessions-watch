@@ -27,6 +27,12 @@ const RESYNC_INTERVAL = 30_000
 // How often the elapsed column is redrawn.
 const TICK_INTERVAL = 1_000
 
+// A parentID cycle would hang blockedAncestors(), and no legitimate Task
+// nesting comes anywhere near this, so the ancestor walk is bounded rather
+// than trusting the data. Duplicated from sessions-toast.tsx:40 rather than
+// shared, the same way toDuration is.
+const MAX_DEPTH = 32
+
 /* -------------------------------------------------------------------------- */
 /* options                                                                     */
 /* -------------------------------------------------------------------------- */
@@ -231,10 +237,40 @@ export function createModel(api: TuiPluginApi, options: Options) {
     sync()
   }
 
-  function derive(sessionID: string): TrackedState {
+  // Every ancestor of every session holding a pending request. Mirrors
+  // sessions-toast's chainOf, in the same direction (up, not down) and with
+  // the same depth guard, so both plugins attribute a blocked subagent to its
+  // root identically by construction rather than by coincidence.
+  function blockedAncestors(): Set<string> {
+    const byID = new Map(sessions().map((s) => [s.id, s]))
+    const blocked = new Set<string>()
+    for (const session of sessions()) {
+      if ((pending.get(session.id)?.size ?? 0) === 0) continue
+      let id = session.parentID
+      let depth = 0
+      while (id !== undefined && depth < MAX_DEPTH) {
+        // A chain already marked by an earlier blocked session is not
+        // rewalked, which keeps this linear and also breaks a cycle before
+        // the depth guard has to.
+        if (blocked.has(id)) break
+        blocked.add(id)
+        id = byID.get(id)?.parentID
+        depth++
+      }
+    }
+    return blocked
+  }
+
+  function derive(sessionID: string, blocked: ReadonlySet<string>): TrackedState {
     // Waiting is not a SessionStatus; a session blocked on a permission is
     // still "busy" underneath, so pending requests have to win.
     if ((pending.get(sessionID)?.size ?? 0) > 0) return "waiting"
+    // A session composes its own pending state with its subagents': a parent
+    // blocked on a child's permission is reported busy by the server, but the
+    // human still has to look at it. Only waiting propagates; a child's own
+    // idle, error and retry stay its own business, matching raiseOwn in
+    // sessions-toast.tsx.
+    if (blocked.has(sessionID)) return "waiting"
     const status = statuses.get(sessionID)
     if (status?.type === "retry") return "retry"
     if (status?.type === "busy") return "working"
@@ -243,8 +279,9 @@ export function createModel(api: TuiPluginApi, options: Options) {
 
   function sync() {
     const at = Date.now()
+    const blocked = blockedAncestors()
     for (const session of sessions()) {
-      const state = derive(session.id)
+      const state = derive(session.id, blocked)
       const previous = tracked.get(session.id)
       if (previous?.state === state) continue
       tracked.set(session.id, {
