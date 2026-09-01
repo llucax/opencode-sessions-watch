@@ -99,7 +99,7 @@ const UNITS: Record<string, number> = {
   d: 86_400_000,
 }
 
-function toDuration(value: unknown, fallback: number): number {
+export function toDuration(value: unknown, fallback: number): number {
   if (typeof value === "number" && Number.isFinite(value)) return value
   if (typeof value !== "string") return fallback
   const match = DURATION.exec(value.trim())
@@ -107,13 +107,13 @@ function toDuration(value: unknown, fallback: number): number {
   return Number(match[1]) * UNITS[match[2]!]!
 }
 
-function toCount(value: unknown, fallback: number): number {
+export function toCount(value: unknown, fallback: number): number {
   if (value === null) return Number.POSITIVE_INFINITY
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return fallback
   return Math.floor(value)
 }
 
-function toOptions(raw: Record<string, unknown> | undefined): Options {
+export function toOptions(raw: Record<string, unknown> | undefined): Options {
   if (!raw) return DEFAULTS
 
   const caps = (raw.maxPerState ?? {}) as Record<string, unknown>
@@ -148,6 +148,26 @@ type Tracked = { state: TrackedState; since: number }
 
 type Model = ReturnType<typeof createModel>
 
+// The seam start() takes to control the passage of time, so a test can drive
+// the ticker and the resync interval without waiting on either for real.
+// Defaults to the real globals, so the tui() entry point, which calls
+// start() with no argument, sees no behaviour change.
+export type Clock = {
+  now: () => number
+  setTimeout: typeof setTimeout
+  clearTimeout: typeof clearTimeout
+  setInterval: typeof setInterval
+  clearInterval: typeof clearInterval
+}
+
+const REAL_CLOCK: Clock = {
+  now: () => Date.now(),
+  setTimeout,
+  clearTimeout,
+  setInterval,
+  clearInterval,
+}
+
 type Level = "debug" | "info" | "warn" | "error"
 
 function log(api: TuiPluginApi, level: Level, message: string, extra?: Record<string, unknown>) {
@@ -171,7 +191,7 @@ async function data<T>(request: Promise<{ data?: T }>, api: TuiPluginApi, what: 
   }
 }
 
-function createModel(api: TuiPluginApi, options: Options) {
+export function createModel(api: TuiPluginApi, options: Options) {
   // Read on each use rather than captured: TuiState carries a `ready` flag, so
   // the path is not necessarily populated when plugins are initialised. The
   // periodic resync repairs anything the first attempt got wrong.
@@ -300,34 +320,48 @@ function createModel(api: TuiPluginApi, options: Options) {
     log(api, "info", "resynced", { directory: where, sessions: sessions().length, ...counts })
   }
 
-  const unsubscribe = [
-    api.event.on("session.status", (event) => {
-      statuses.set(event.properties.sessionID, event.properties.status)
-      sync()
-    }),
-    api.event.on("session.idle", (event) => {
-      statuses.set(event.properties.sessionID, { type: "idle" })
-      sync()
-    }),
-    api.event.on("permission.asked", (event) => block(event.properties.sessionID, `p:${event.properties.id}`)),
-    api.event.on("permission.replied", (event) => unblock(event.properties.sessionID, `p:${event.properties.requestID}`)),
-    api.event.on("question.asked", (event) => block(event.properties.sessionID, `q:${event.properties.id}`)),
-    api.event.on("question.replied", (event) => unblock(event.properties.sessionID, `q:${event.properties.requestID}`)),
-    api.event.on("question.rejected", (event) => unblock(event.properties.sessionID, `q:${event.properties.requestID}`)),
-    api.event.on("session.created", (event) => upsert(event.properties.info)),
-    api.event.on("session.updated", (event) => upsert(event.properties.info)),
-    api.event.on("session.deleted", (event) => remove(event.properties.sessionID)),
-  ]
+  let unsubscribe: Array<() => void> = []
+  let ticker: ReturnType<typeof setInterval> | undefined
+  let resyncer: ReturnType<typeof setInterval> | undefined
+  let clock: Clock = REAL_CLOCK
 
-  const ticker = setInterval(() => setNow(Date.now()), TICK_INTERVAL)
-  const resyncer = setInterval(() => void resync(), RESYNC_INTERVAL)
+  // Subscribes to the event stream, starts the ticker and the resync
+  // interval, and fires the first resync. Split out of construction so
+  // creating a model has no side effect: the tui() entry point calls
+  // start() right after, so runtime behaviour is unchanged, and a test
+  // calls it with a fake clock instead of reaching for the network.
+  function start(seam: Clock = REAL_CLOCK) {
+    clock = seam
+    unsubscribe = [
+      api.event.on("session.status", (event) => {
+        statuses.set(event.properties.sessionID, event.properties.status)
+        sync()
+      }),
+      api.event.on("session.idle", (event) => {
+        statuses.set(event.properties.sessionID, { type: "idle" })
+        sync()
+      }),
+      api.event.on("permission.asked", (event) => block(event.properties.sessionID, `p:${event.properties.id}`)),
+      api.event.on("permission.replied", (event) => unblock(event.properties.sessionID, `p:${event.properties.requestID}`)),
+      api.event.on("question.asked", (event) => block(event.properties.sessionID, `q:${event.properties.id}`)),
+      api.event.on("question.replied", (event) => unblock(event.properties.sessionID, `q:${event.properties.requestID}`)),
+      api.event.on("question.rejected", (event) => unblock(event.properties.sessionID, `q:${event.properties.requestID}`)),
+      api.event.on("session.created", (event) => upsert(event.properties.info)),
+      api.event.on("session.updated", (event) => upsert(event.properties.info)),
+      api.event.on("session.deleted", (event) => remove(event.properties.sessionID)),
+    ]
 
-  void resync()
+    ticker = clock.setInterval(() => setNow(clock.now()), TICK_INTERVAL)
+    resyncer = clock.setInterval(() => void resync(), RESYNC_INTERVAL)
+
+    void resync()
+  }
 
   function dispose() {
-    clearInterval(ticker)
-    clearInterval(resyncer)
+    if (ticker !== undefined) clock.clearInterval(ticker)
+    if (resyncer !== undefined) clock.clearInterval(resyncer)
     for (const off of unsubscribe) off()
+    unsubscribe = []
   }
 
   return {
@@ -335,6 +369,7 @@ function createModel(api: TuiPluginApi, options: Options) {
     sessions,
     now,
     revision,
+    start,
     dispose,
     stateOf: (sessionID: string): TrackedState => tracked.get(sessionID)?.state ?? "idle",
     sinceOf: (sessionID: string, fallback: number): number => tracked.get(sessionID)?.since ?? fallback,
@@ -367,7 +402,7 @@ type Row = {
 // `now - since` instead is idempotent, and costs only a re-sort of a handful of
 // rows a second, which `select()` gets for free by already reading
 // `model.now()`.
-function toRow(model: Model, session: Session, at: number, current: boolean, depth: number): Row {
+export function toRow(model: Model, session: Session, at: number, current: boolean, depth: number): Row {
   const state = model.stateOf(session.id)
   const since = model.sinceOf(session.id, session.time.updated)
   return {
@@ -389,20 +424,20 @@ function toRow(model: Model, session: Session, at: number, current: boolean, dep
 // stopped. `since` is what the elapsed column shows and what decided which of
 // the two idle groups the row landed in, so sorting on it makes each group read
 // monotonically down the screen and agree with itself.
-function order(state: State, rows: Row[]): Row[] {
+export function order(state: State, rows: Row[]): Row[] {
   return state === "idleFresh" || state === "idle"
     ? rows.sort((a, b) => b.since - a.since)
     : rows.sort((a, b) => a.since - b.since)
 }
 
 // Groups a mixed list into the display order and sorts within each group.
-function grouped(rows: Row[]): Row[] {
+export function grouped(rows: Row[]): Row[] {
   const byState = new Map<State, Row[]>(STATES.map((state) => [state, []]))
   for (const row of rows) byState.get(row.state)!.push(row)
   return STATES.flatMap((state) => order(state, byState.get(state)!))
 }
 
-function select(model: Model, currentID: string): Row[] {
+export function select(model: Model, currentID: string): Row[] {
   const options = model.options
   const at = model.now()
   const showTree = options.subagents === "tree" || options.subagents === "all-tree"
@@ -482,7 +517,7 @@ function select(model: Model, currentID: string): Row[] {
   return picked.slice(0, options.maxTotal)
 }
 
-function tasksOf(model: Model, currentID: string): Row[] {
+export function tasksOf(model: Model, currentID: string): Row[] {
   if (model.options.subagents !== "section") return []
   const at = model.now()
   const rows: Row[] = []
@@ -502,7 +537,7 @@ function tasksOf(model: Model, currentID: string): Row[] {
 // always the same glyph and the padded times line up exactly. Only the seams
 // between groups drift, by however much the two emoji differ in width, which is
 // a fair price for alignment everywhere else.
-function elapsed(ms: number): string {
+export function elapsed(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000))
   if (seconds < 60) return "<1m"
   const minutes = Math.floor(seconds / 60)
@@ -612,6 +647,7 @@ const tui: TuiPlugin = async (api, options) => {
   // with the first time the sidebar is opened. Durations would otherwise all
   // begin at the moment you first looked at them.
   const [model, disposeRoot] = createRoot((dispose) => [createModel(api, parsed), dispose] as const)
+  model.start()
 
   api.lifecycle.onDispose(() => {
     model.dispose()
