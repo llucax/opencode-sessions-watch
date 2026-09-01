@@ -91,7 +91,7 @@ const UNITS: Record<string, number> = {
 // Copied from the sidebar rather than shared. The distribution convention is
 // "symlink the plugin file", so an import between the two would break it, and
 // this is nearly all there is to share.
-function toDuration(value: unknown, fallback: number): number {
+export function toDuration(value: unknown, fallback: number): number {
   if (typeof value === "number" && Number.isFinite(value)) return value
   if (typeof value !== "string") return fallback
   const match = DURATION.exec(value.trim())
@@ -99,12 +99,12 @@ function toDuration(value: unknown, fallback: number): number {
   return Number(match[1]) * UNITS[match[2]!]!
 }
 
-function toCount(value: unknown, fallback: number): number {
+export function toCount(value: unknown, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 1) return fallback
   return Math.floor(value)
 }
 
-function toTriggers(value: unknown, fallback: ReadonlySet<Trigger>): ReadonlySet<Trigger> {
+export function toTriggers(value: unknown, fallback: ReadonlySet<Trigger>): ReadonlySet<Trigger> {
   if (!Array.isArray(value)) return fallback
   const picked = new Set<Trigger>()
   for (const entry of value) {
@@ -114,14 +114,14 @@ function toTriggers(value: unknown, fallback: ReadonlySet<Trigger>): ReadonlySet
   return picked
 }
 
-function toJumpKey(value: unknown, fallback: string | false): string | false {
+export function toJumpKey(value: unknown, fallback: string | false): string | false {
   if (value === false) return false
   if (typeof value !== "string") return fallback
   const key = value.trim()
   return key ? key : false
 }
 
-function toOptions(raw: Record<string, unknown> | undefined): Options {
+export function toOptions(raw: Record<string, unknown> | undefined): Options {
   if (!raw) return DEFAULTS
   return {
     triggers: toTriggers(raw.triggers, DEFAULTS.triggers),
@@ -148,18 +148,18 @@ function log(api: TuiPluginApi, level: Level, message: string, extra?: Record<st
   }
 }
 
-function titleOf(session: Session): string {
+export function titleOf(session: Session): string {
   return session.title || session.slug || session.id
 }
 
-function truncate(text: string, width: number): string {
+export function truncate(text: string, width: number): string {
   return text.length <= width ? text : `${text.slice(0, Math.max(1, width - 1))}\u2026`
 }
 
 // Mirrors what internal:notifications reports, since the two are read together:
 // an abort and a stalled stream are reworded because their raw messages say
 // nothing useful, and anything else is shown as it came.
-function errorMessage(error: unknown): string {
+export function errorMessage(error: unknown): string {
   const shape = error as { name?: unknown; data?: { message?: unknown } } | undefined
   if (shape?.name === "MessageAbortedError") return "Session aborted"
   const message = typeof shape?.data?.message === "string" ? shape.data.message.trim() : ""

@@ -99,7 +99,7 @@ const UNITS: Record<string, number> = {
   d: 86_400_000,
 }
 
-function toDuration(value: unknown, fallback: number): number {
+export function toDuration(value: unknown, fallback: number): number {
   if (typeof value === "number" && Number.isFinite(value)) return value
   if (typeof value !== "string") return fallback
   const match = DURATION.exec(value.trim())
@@ -107,13 +107,13 @@ function toDuration(value: unknown, fallback: number): number {
   return Number(match[1]) * UNITS[match[2]!]!
 }
 
-function toCount(value: unknown, fallback: number): number {
+export function toCount(value: unknown, fallback: number): number {
   if (value === null) return Number.POSITIVE_INFINITY
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return fallback
   return Math.floor(value)
 }
 
-function toOptions(raw: Record<string, unknown> | undefined): Options {
+export function toOptions(raw: Record<string, unknown> | undefined): Options {
   if (!raw) return DEFAULTS
 
   const caps = (raw.maxPerState ?? {}) as Record<string, unknown>
@@ -367,7 +367,7 @@ type Row = {
 // `now - since` instead is idempotent, and costs only a re-sort of a handful of
 // rows a second, which `select()` gets for free by already reading
 // `model.now()`.
-function toRow(model: Model, session: Session, at: number, current: boolean, depth: number): Row {
+export function toRow(model: Model, session: Session, at: number, current: boolean, depth: number): Row {
   const state = model.stateOf(session.id)
   const since = model.sinceOf(session.id, session.time.updated)
   return {
@@ -389,20 +389,20 @@ function toRow(model: Model, session: Session, at: number, current: boolean, dep
 // stopped. `since` is what the elapsed column shows and what decided which of
 // the two idle groups the row landed in, so sorting on it makes each group read
 // monotonically down the screen and agree with itself.
-function order(state: State, rows: Row[]): Row[] {
+export function order(state: State, rows: Row[]): Row[] {
   return state === "idleFresh" || state === "idle"
     ? rows.sort((a, b) => b.since - a.since)
     : rows.sort((a, b) => a.since - b.since)
 }
 
 // Groups a mixed list into the display order and sorts within each group.
-function grouped(rows: Row[]): Row[] {
+export function grouped(rows: Row[]): Row[] {
   const byState = new Map<State, Row[]>(STATES.map((state) => [state, []]))
   for (const row of rows) byState.get(row.state)!.push(row)
   return STATES.flatMap((state) => order(state, byState.get(state)!))
 }
 
-function select(model: Model, currentID: string): Row[] {
+export function select(model: Model, currentID: string): Row[] {
   const options = model.options
   const at = model.now()
   const showTree = options.subagents === "tree" || options.subagents === "all-tree"
@@ -482,7 +482,7 @@ function select(model: Model, currentID: string): Row[] {
   return picked.slice(0, options.maxTotal)
 }
 
-function tasksOf(model: Model, currentID: string): Row[] {
+export function tasksOf(model: Model, currentID: string): Row[] {
   if (model.options.subagents !== "section") return []
   const at = model.now()
   const rows: Row[] = []
@@ -502,7 +502,7 @@ function tasksOf(model: Model, currentID: string): Row[] {
 // always the same glyph and the padded times line up exactly. Only the seams
 // between groups drift, by however much the two emoji differ in width, which is
 // a fair price for alignment everywhere else.
-function elapsed(ms: number): string {
+export function elapsed(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000))
   if (seconds < 60) return "<1m"
   const minutes = Math.floor(seconds / 60)
