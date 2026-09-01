@@ -76,24 +76,38 @@ by whether they are waiting on you, freshly idle, retrying, working, or idle for
 longer, each with how long it has been that way.
 
     Active Sessions
-    ❓ (<1m) Fix the flaky reconnect test
-    ❓ ( 5m) Draft the release notes
-    ✅ ( 2m) Review PR 412
-    ✅ (11m) Add the --json flag
-    🔄 (47m) Port the parser to nom 8
-    ⚙️ ( 2h) Rewrite the config loader
-    💤 ( 1d) Look into the CI cache
+    ? (<1m) Fix the flaky reconnect test
+    ? ( 5m) Draft the release notes
+    ✓ ( 2m) Review PR 412
+    ✓ (11m) Add the --json flag
+    ↻ (47m) Port the parser to nom 8
+    ⏵ ( 2h) Rewrite the config loader
+    ┄ ( 1d) Look into the CI cache
 
     Current Session Tasks
-    ⚙️ ( 8m) explore: find the retry logic
+    ⏵ ( 8m) explore: find the retry logic
 
 | Icon | Group       | Meaning                                           |
 |------|-------------|---------------------------------------------------|
-| ❓   | `waiting`   | a permission or question is awaiting a reply      |
-| ✅   | `idleFresh` | stopped within `idleFreshAge`; probably wants you |
-| 🔄   | `retry`     | a provider call failed and is being retried       |
-| ⚙️   | `working`   | the agent is running                              |
-| 💤   | `idle`      | stopped longer ago; history                       |
+| ?    | `waiting`   | a permission or question is awaiting a reply      |
+| ✓    | `idleFresh` | stopped within `idleFreshAge`; probably wants you |
+| ↻    | `retry`     | a provider call failed and is being retried       |
+| ⏵    | `working`   | the agent is running                              |
+| ┄    | `idle`      | stopped longer ago; history                       |
+
+The defaults are deliberately one column wide, against two separate ways a
+glyph can go wrong there. opencode's session switcher dims the sidebar
+behind it, but OpenTUI's compositor only blends a cell it itself measures as
+one column; a cell it measures as two loses its glyph outright rather than
+dimming ([opentui#837](https://github.com/anomalyco/opentui/issues/837),
+`eawToWidth()` in OpenTUI's `packages/native/src/utf8.zig`). A codepoint a
+terminal draws wider than that regardless, without OpenTUI agreeing, merely
+shifts the row instead. `idle`'s `┄` is a deliberate exception: it is
+Ambiguous width, so a terminal that draws Ambiguous wide can shift that one
+row, but it composites correctly behind a dialog regardless, and the
+legibility was worth that risk. If your terminal disagrees about any of
+these, or you would rather have emoji back and never look at a dimmed
+sidebar, override it with the `icons` option below.
 
 Groups are listed in that order: waiting blocks on you, a session that has just
 stopped most likely wants you now, retry is quietly stalling, working is fine,
@@ -124,8 +138,36 @@ the plugin noticed it.
 | `maxPerState`    | unlimited   | per-group caps: `{ waiting, idleFresh, retry, working, idle }`    |
 | `showCurrent`    | `false`     | pin the session being viewed at the top, bold and accent-coloured |
 | `subagents`      | `"section"` | how Task-tool child sessions appear, see below                    |
+| `icons`          | see above   | per-group icon overrides, e.g. `{ "waiting": "!" }`                |
 
-A count given as `null` means unlimited.
+A count given as `null` means unlimited. `icons` is a partial map: name only the
+states you want to change, the rest keep their default.
+
+#### Nerd Font icons
+
+If you use a [Nerd Font](https://www.nerdfonts.com/), we recommend using these
+icons instead:
+
+    {
+      "icons": {
+        "waiting": "\uf059",
+        "idleFresh": "\uf058",
+        "retry": "\uf021",
+        "working": "\uf04b",
+        "idle": "\uf186"
+      }
+    }
+
+| State       | Codepoint | Name                    |
+|-------------|-----------|-------------------------|
+| `waiting`   | `U+F059`  | `nf-fa-question_circle` |
+| `idleFresh` | `U+F058`  | `nf-fa-check_circle`    |
+| `retry`     | `U+F021`  | `nf-fa-refresh`         |
+| `working`   | `U+F04B`  | `nf-fa-play`            |
+| `idle`      | `U+F186`  | `nf-fa-moon_o`          |
+
+Check whether your terminal font is patched with `printf '\uf059 \uf058 \uf021
+\uf04b \uf186\n'`; five icons means it is, boxes mean it is not.
 
 The two idle thresholds answer different questions and are not clamped against
 each other: `idleMaxAge` decides whether a row is shown at all, `idleFreshAge`
